@@ -1,6 +1,6 @@
 # redis-clone
 
-A Redis server built from scratch on raw TCP sockets with `asyncio`, speaking real RESP so genuine Redis clients (`redis-cli`, `redis-py`) can talk to it unmodified. Learning project — see `CLAUDE.md` for the full scope and `progress.md` for a running log.
+A Redis-compatible server built from scratch on raw TCP sockets with `asyncio`, speaking real RESP so genuine Redis clients (`redis-cli`, `redis-py`) can talk to it unmodified.
 
 Currently implemented: the RESP protocol layer, the TCP server with connection handling, and an in-memory storage layer backing `PING`, `GET`, `SET`, and `DEL`.
 
