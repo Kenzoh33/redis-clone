@@ -132,6 +132,17 @@ def test_key_expires_via_sweep_whether_or_not_it_is_ever_read_again():
     assert store._data["untouched"] == "still here"
 
 
+def test_ttl_positive_immediately_after_expire_with_real_clock():
+    # Uses the real default clock (not FakeClock) - the fake-clock tests
+    # above start at t=0 with no advance, which can't reveal a bug in how
+    # a real, nonzero timestamp is computed. This can.
+    store = Store()
+    store.set("temp", "val")
+    assert store.expire("temp", 2) is True
+    assert store.ttl("temp") > 0
+    assert store.get("temp") == "val"
+
+
 def test_active_expiration_loop_removes_expired_key_without_a_read():
     clock = FakeClock()
     store = Store(clock=clock)

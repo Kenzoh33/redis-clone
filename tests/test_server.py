@@ -123,6 +123,17 @@ def test_ttl_missing_key_returns_minus_two(redis_server):
     assert client.ttl("nosuchkey") == -2
 
 
+def test_ttl_is_positive_immediately_after_expire(redis_server):
+    # Regression test: TTL must reflect a freshly-set expiry right away,
+    # with no sleep - not treat the key as already expired the instant
+    # EXPIRE returns.
+    client = redis.Redis(host=HOST, port=PORT, protocol=2)
+    client.set("temp", "val")
+    assert client.expire("temp", 2) is True
+    assert client.ttl("temp") > 0
+    assert client.get("temp") == b"val"
+
+
 def test_passive_expiration_end_to_end(redis_server):
     client = redis.Redis(host=HOST, port=PORT, protocol=2)
     client.set("foo", "bar")
