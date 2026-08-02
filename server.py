@@ -2,10 +2,19 @@
 
 import asyncio
 
-from protocol import encode_bulk_string, encode_error, encode_simple_string, parse_command
+from protocol import (
+    encode_bulk_string,
+    encode_error,
+    encode_integer,
+    encode_simple_string,
+    parse_command,
+)
+from store import Store
 
 HOST = "127.0.0.1"
 PORT = 6379
+
+store = Store()
 
 
 def handle_ping(args: list[str]) -> bytes:
@@ -14,8 +23,30 @@ def handle_ping(args: list[str]) -> bytes:
     return encode_simple_string("PONG")
 
 
+def handle_get(args: list[str]) -> bytes:
+    if len(args) != 1:
+        return encode_error("ERR wrong number of arguments for 'get' command")
+    return encode_bulk_string(store.get(args[0]))
+
+
+def handle_set(args: list[str]) -> bytes:
+    if len(args) != 2:
+        return encode_error("ERR wrong number of arguments for 'set' command")
+    store.set(args[0], args[1])
+    return encode_simple_string("OK")
+
+
+def handle_del(args: list[str]) -> bytes:
+    if not args:
+        return encode_error("ERR wrong number of arguments for 'del' command")
+    return encode_integer(store.delete(*args))
+
+
 COMMANDS = {
     "PING": handle_ping,
+    "GET": handle_get,
+    "SET": handle_set,
+    "DEL": handle_del,
 }
 
 

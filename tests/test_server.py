@@ -2,6 +2,7 @@ import socket
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -54,3 +55,67 @@ def test_unknown_command_returns_error(redis_server):
     client = redis.Redis(host=HOST, port=PORT, protocol=2)
     with pytest.raises(redis.ResponseError):
         client.execute_command("FOOBAR")
+
+
+def test_set_get_roundtrip(redis_server):
+    client = redis.Redis(host=HOST, port=PORT, protocol=2)
+    assert client.set("foo", "bar") is True
+    assert client.get("foo") == b"bar"
+
+
+def test_get_missing_key_returns_none(redis_server):
+    client = redis.Redis(host=HOST, port=PORT, protocol=2)
+    assert client.get("nosuchkey") is None
+
+
+def test_del_returns_count_and_removes_key(redis_server):
+    client = redis.Redis(host=HOST, port=PORT, protocol=2)
+    client.set("foo", "bar")
+    assert client.delete("foo") == 1
+    assert client.get("foo") is None
+    assert client.delete("foo") == 0
+
+
+@pytest.mark.parametrize("command,args", [("get", ()), ("set", ("onlyonearg",))])
+def test_wrong_arity_returns_error(redis_server, command, args):
+    client = redis.Redis(host=HOST, port=PORT, protocol=2)
+    with pytest.raises(redis.ResponseError):
+        client.execute_command(command.upper(), *args)
+
+
+def test_concurrent_set_get_no_cross_talk(redis_server):
+    # Many simultaneous connections each writing/reading a distinct key,
+    # proving the shared dict in store.py isn't corrupted under concurrency.
+    def set_and_get(i: int) -> tuple[int, bytes | None]:
+        client = redis.Redis(host=HOST, port=PORT, protocol=2)
+        key = f"key:{i}"
+        value = f"value:{i}"
+        client.set(key, value)
+        return i, client.get(key)
+
+    with ThreadPoolExecutor(max_workers=50) as pool:
+        results = list(pool.map(set_and_get, range(200)))
+
+    for i, value in results:
+        assert value == f"value:{i}".encode()
+
+
+def test_concurrent_delete_no_lost_updates(redis_server):
+    # Many connections race to delete the same set of pre-existing keys.
+    # The counts they each report deleting must sum to exactly the number
+    # of keys that existed - no double-counting a key two clients both saw.
+    client = redis.Redis(host=HOST, port=PORT, protocol=2)
+    keys = [f"race:{i}" for i in range(100)]
+    for key in keys:
+        client.set(key, "x")
+
+    def delete_all() -> int:
+        worker_client = redis.Redis(host=HOST, port=PORT, protocol=2)
+        return worker_client.delete(*keys)
+
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        deleted_counts = list(pool.map(lambda _: delete_all(), range(20)))
+
+    assert sum(deleted_counts) == len(keys)
+    for key in keys:
+        assert client.get(key) is None
