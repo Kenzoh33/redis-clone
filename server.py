@@ -9,10 +9,11 @@ from protocol import (
     encode_simple_string,
     parse_command,
 )
-from store import Store
+from store import Store, run_active_expiration
 
 HOST = "127.0.0.1"
 PORT = 6379
+ACTIVE_EXPIRATION_INTERVAL_SECONDS = 1.0
 
 store = Store()
 
@@ -42,11 +43,29 @@ def handle_del(args: list[str]) -> bytes:
     return encode_integer(store.delete(*args))
 
 
+def handle_expire(args: list[str]) -> bytes:
+    if len(args) != 2:
+        return encode_error("ERR wrong number of arguments for 'expire' command")
+    try:
+        seconds = int(args[1])
+    except ValueError:
+        return encode_error("ERR value is not an integer or out of range")
+    return encode_integer(1 if store.expire(args[0], seconds) else 0)
+
+
+def handle_ttl(args: list[str]) -> bytes:
+    if len(args) != 1:
+        return encode_error("ERR wrong number of arguments for 'ttl' command")
+    return encode_integer(store.ttl(args[0]))
+
+
 COMMANDS = {
     "PING": handle_ping,
     "GET": handle_get,
     "SET": handle_set,
     "DEL": handle_del,
+    "EXPIRE": handle_expire,
+    "TTL": handle_ttl,
 }
 
 
@@ -84,6 +103,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
 
 async def main() -> None:
+    asyncio.create_task(run_active_expiration(store, ACTIVE_EXPIRATION_INTERVAL_SECONDS))
     server = await asyncio.start_server(handle_client, HOST, PORT)
     print(f"listening on {HOST}:{PORT}")
     async with server:

@@ -100,6 +100,38 @@ def test_concurrent_set_get_no_cross_talk(redis_server):
         assert value == f"value:{i}".encode()
 
 
+def test_expire_existing_key(redis_server):
+    client = redis.Redis(host=HOST, port=PORT, protocol=2)
+    client.set("foo", "bar")
+    assert client.expire("foo", 100) is True
+    assert 0 < client.ttl("foo") <= 100
+
+
+def test_expire_missing_key_returns_false(redis_server):
+    client = redis.Redis(host=HOST, port=PORT, protocol=2)
+    assert client.expire("nosuchkey", 10) is False
+
+
+def test_ttl_no_expiry_returns_minus_one(redis_server):
+    client = redis.Redis(host=HOST, port=PORT, protocol=2)
+    client.set("foo", "bar")
+    assert client.ttl("foo") == -1
+
+
+def test_ttl_missing_key_returns_minus_two(redis_server):
+    client = redis.Redis(host=HOST, port=PORT, protocol=2)
+    assert client.ttl("nosuchkey") == -2
+
+
+def test_passive_expiration_end_to_end(redis_server):
+    client = redis.Redis(host=HOST, port=PORT, protocol=2)
+    client.set("foo", "bar")
+    client.expire("foo", 1)
+    time.sleep(1.2)
+    assert client.get("foo") is None
+    assert client.ttl("foo") == -2
+
+
 def test_concurrent_delete_no_lost_updates(redis_server):
     # Many connections race to delete the same set of pre-existing keys.
     # The counts they each report deleting must sum to exactly the number

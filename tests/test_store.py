@@ -1,4 +1,17 @@
-from store import Store
+import asyncio
+
+from store import Store, run_active_expiration
+
+
+class FakeClock:
+    def __init__(self, now: float = 0.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
 
 
 def test_get_missing_key_returns_none():
@@ -38,3 +51,102 @@ def test_delete_multiple_keys_returns_count_of_existing_ones():
     assert store.delete("a", "b", "c") == 2
     assert store.get("a") is None
     assert store.get("b") is None
+
+
+def test_expire_missing_key_returns_false():
+    store = Store()
+    assert store.expire("nosuchkey", 10) is False
+
+
+def test_expire_existing_key_returns_true_and_sets_ttl():
+    clock = FakeClock()
+    store = Store(clock=clock)
+    store.set("foo", "bar")
+    assert store.expire("foo", 10) is True
+    assert store.ttl("foo") == 10
+
+
+def test_expire_nonpositive_seconds_deletes_immediately():
+    store = Store()
+    store.set("foo", "bar")
+    assert store.expire("foo", 0) is True
+    assert store.get("foo") is None
+
+
+def test_ttl_of_key_without_expiry_returns_minus_one():
+    store = Store()
+    store.set("foo", "bar")
+    assert store.ttl("foo") == -1
+
+
+def test_ttl_of_missing_key_returns_minus_two():
+    store = Store()
+    assert store.ttl("nosuchkey") == -2
+
+
+def test_ttl_counts_down_as_clock_advances():
+    clock = FakeClock()
+    store = Store(clock=clock)
+    store.set("foo", "bar")
+    store.expire("foo", 10)
+    clock.advance(4)
+    assert store.ttl("foo") == 6
+
+
+def test_set_clears_existing_ttl():
+    clock = FakeClock()
+    store = Store(clock=clock)
+    store.set("foo", "bar")
+    store.expire("foo", 10)
+    store.set("foo", "baz")
+    assert store.ttl("foo") == -1
+
+
+def test_get_returns_none_and_removes_key_after_passive_expiry():
+    clock = FakeClock()
+    store = Store(clock=clock)
+    store.set("foo", "bar")
+    store.expire("foo", 5)
+
+    clock.advance(6)
+    assert store.get("foo") is None
+    assert "foo" not in store._data
+
+
+def test_key_expires_via_sweep_whether_or_not_it_is_ever_read_again():
+    # No get()/ttl() call on "foo" at any point - sweep_expired() alone
+    # (what the active-expiration background loop calls on each tick)
+    # must be the thing that removes it.
+    clock = FakeClock()
+    store = Store(clock=clock)
+    store.set("foo", "bar")
+    store.expire("foo", 5)
+    store.set("untouched", "still here")
+
+    clock.advance(10)
+    removed_count = store.sweep_expired()
+
+    assert removed_count == 1
+    assert "foo" not in store._data
+    assert "foo" not in store._expires_at
+    assert store._data["untouched"] == "still here"
+
+
+def test_active_expiration_loop_removes_expired_key_without_a_read():
+    clock = FakeClock()
+    store = Store(clock=clock)
+    store.set("foo", "bar")
+    store.expire("foo", 5)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(run_active_expiration(store, interval=0.01))
+        clock.advance(10)
+        await asyncio.sleep(0.05)  # let the loop tick at least once
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(scenario())
+    assert "foo" not in store._data
