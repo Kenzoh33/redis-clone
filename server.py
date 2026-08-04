@@ -1,7 +1,10 @@
 """Asyncio TCP server: accepts connections and dispatches RESP commands."""
 
 import asyncio
+import sys
+import time
 
+from persistence import PersistenceLog, replay
 from protocol import (
     encode_array,
     encode_bulk_string,
@@ -15,8 +18,10 @@ from store import Store, run_active_expiration
 HOST = "127.0.0.1"
 PORT = 6379
 ACTIVE_EXPIRATION_INTERVAL_SECONDS = 1.0
+DEFAULT_LOG_PATH = "appendonly.log"
 
 store = Store()
+persistence_log: PersistenceLog | None = None
 
 
 def handle_ping(args: list[str]) -> bytes:
@@ -125,6 +130,17 @@ COMMANDS = {
     "TYPE": handle_type,
 }
 
+MUTATING_COMMANDS = {"SET", "DEL", "EXPIRE", "INCR", "DECR", "APPEND", "MSET"}
+
+
+def apply_logged_command(args: list[str]) -> None:
+    name, cmd_args = args[0], args[1:]
+    if name == "EXPIRE":
+        key, deadline_str = cmd_args
+        store.expire(key, float(deadline_str) - time.time())
+    else:
+        COMMANDS[name](cmd_args)
+
 
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     peer = writer.get_extra_info("peername")
@@ -151,6 +167,13 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             else:
                 response = handler(command[1:])
 
+                if name in MUTATING_COMMANDS and not response.startswith(b"-"):
+                    if name == "EXPIRE":
+                        deadline = time.time() + int(command[2])
+                        persistence_log.append(["EXPIRE", command[1], str(deadline)])
+                    else:
+                        persistence_log.append([name, *command[1:]])
+
             writer.write(response)
             await writer.drain()
     finally:
@@ -160,6 +183,12 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
 
 async def main() -> None:
+    global persistence_log
+
+    log_path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_LOG_PATH
+    replay(log_path, apply=apply_logged_command)
+    persistence_log = PersistenceLog(log_path)
+
     asyncio.create_task(run_active_expiration(store, ACTIVE_EXPIRATION_INTERVAL_SECONDS))
     server = await asyncio.start_server(handle_client, HOST, PORT)
     print(f"listening on {HOST}:{PORT}")

@@ -25,8 +25,9 @@ def _wait_for_port(host: str, port: int, timeout: float = 5.0) -> None:
 
 
 @pytest.fixture()
-def redis_server():
-    proc = subprocess.Popen([sys.executable, str(SERVER_SCRIPT)])
+def redis_server(tmp_path):
+    log_path = tmp_path / "test.aof"
+    proc = subprocess.Popen([sys.executable, str(SERVER_SCRIPT), str(log_path)])
     try:
         _wait_for_port(HOST, PORT)
         yield
@@ -293,3 +294,72 @@ def test_concurrent_append_no_lost_updates(redis_server):
     final = client.get("log")
     assert len(final) == workers * appends_per_worker * len(token)
     assert final == (token * (workers * appends_per_worker)).encode()
+
+
+def _spawn_server(log_path) -> subprocess.Popen:
+    proc = subprocess.Popen([sys.executable, str(SERVER_SCRIPT), str(log_path)])
+    _wait_for_port(HOST, PORT)
+    return proc
+
+
+def test_crash_recovery_preserves_data(tmp_path):
+    log_path = tmp_path / "crash.aof"
+
+    proc = _spawn_server(log_path)
+    try:
+        client = redis.Redis(host=HOST, port=PORT, protocol=2)
+        client.set("foo", "bar")
+        client.set("baz", "qux")
+        client.execute_command("INCR", "counter")
+        client.execute_command("INCR", "counter")
+        client.expire("foo", 3600)
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
+
+    proc = _spawn_server(log_path)
+    try:
+        client = redis.Redis(host=HOST, port=PORT, protocol=2)
+        assert client.get("foo") == b"bar"
+        assert client.get("baz") == b"qux"
+        assert client.get("counter") == b"2"
+        assert client.ttl("foo") > 0
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+def test_crash_recovery_expired_key_during_downtime_is_gone(tmp_path):
+    log_path = tmp_path / "crash.aof"
+
+    proc = _spawn_server(log_path)
+    try:
+        client = redis.Redis(host=HOST, port=PORT, protocol=2)
+        client.set("foo", "bar")
+        client.expire("foo", 1)
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
+
+    time.sleep(2)
+
+    proc = _spawn_server(log_path)
+    try:
+        client = redis.Redis(host=HOST, port=PORT, protocol=2)
+        assert client.get("foo") is None
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
+
+
+def test_fresh_server_with_no_log_starts_empty(tmp_path):
+    log_path = tmp_path / "does_not_exist_yet.aof"
+
+    proc = _spawn_server(log_path)
+    try:
+        client = redis.Redis(host=HOST, port=PORT, protocol=2)
+        assert client.get("foo") is None
+        assert client.get("bar") is None
+    finally:
+        proc.terminate()
+        proc.wait(timeout=5)
