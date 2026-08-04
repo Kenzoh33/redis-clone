@@ -2,7 +2,7 @@
 
 A Redis-compatible server built from scratch on raw TCP sockets with `asyncio`, speaking real RESP so genuine Redis clients (`redis-cli`, `redis-py`) can talk to it unmodified.
 
-Currently implemented: the RESP protocol layer, the TCP server with connection handling, and an in-memory storage layer backing `PING`, `GET`, `SET`, and `DEL`.
+Currently implemented: the RESP protocol layer, the TCP server with connection handling, and an in-memory storage layer backing `PING`, `GET`, `SET`, `DEL`, `EXPIRE`, `TTL`, `EXISTS`, `INCR`, `DECR`, `APPEND`, `MSET`, `MGET`, and `TYPE`.
 
 ## Run the server
 

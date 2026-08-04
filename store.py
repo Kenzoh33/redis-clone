@@ -63,6 +63,47 @@ class Store:
             self._expires_at.pop(key, None)
         return len(expired_keys)
 
+    def exists(self, *keys: str) -> int:
+        count = 0
+        for key in keys:
+            self._expire_if_due(key)
+            if key in self._data:
+                count += 1
+        return count
+
+    def _add_to_int(self, key: str, delta: int) -> int:
+        self._expire_if_due(key)
+        try:
+            current = int(self._data.get(key, "0"))
+        except ValueError:
+            raise ValueError("value is not an integer or out of range")
+        new_value = current + delta
+        self._data[key] = str(new_value)
+        return new_value
+
+    def incr(self, key: str) -> int:
+        return self._add_to_int(key, 1)
+
+    def decr(self, key: str) -> int:
+        return self._add_to_int(key, -1)
+
+    def append(self, key: str, value: str) -> int:
+        self._expire_if_due(key)
+        new_value = self._data.get(key, "") + value
+        self._data[key] = new_value
+        return len(new_value)
+
+    def mset(self, items: dict[str, str]) -> None:
+        for key, value in items.items():
+            self.set(key, value)
+
+    def mget(self, *keys: str) -> list[str | None]:
+        return [self.get(key) for key in keys]
+
+    def type(self, key: str) -> str:
+        self._expire_if_due(key)
+        return "string" if key in self._data else "none"
+
 
 async def run_active_expiration(store: Store, interval: float) -> None:
     while True:

@@ -76,7 +76,24 @@ def test_del_returns_count_and_removes_key(redis_server):
     assert client.delete("foo") == 0
 
 
-@pytest.mark.parametrize("command,args", [("get", ()), ("set", ("onlyonearg",))])
+@pytest.mark.parametrize(
+    "command,args",
+    [
+        ("get", ()),
+        ("set", ("onlyonearg",)),
+        ("exists", ()),
+        ("incr", ()),
+        ("incr", ("a", "b")),
+        ("decr", ()),
+        ("append", ()),
+        ("append", ("onlyonearg",)),
+        ("mset", ()),
+        ("mset", ("onlyonekey",)),
+        ("mget", ()),
+        ("type", ()),
+        ("type", ("a", "b")),
+    ],
+)
 def test_wrong_arity_returns_error(redis_server, command, args):
     client = redis.Redis(host=HOST, port=PORT, protocol=2)
     with pytest.raises(redis.ResponseError):
@@ -162,3 +179,117 @@ def test_concurrent_delete_no_lost_updates(redis_server):
     assert sum(deleted_counts) == len(keys)
     for key in keys:
         assert client.get(key) is None
+
+
+def test_exists_counts_only_existing_keys(redis_server):
+    client = redis.Redis(host=HOST, port=PORT, protocol=2)
+    client.set("a", "1")
+    client.set("b", "2")
+    assert client.exists("a", "b", "c") == 2
+
+
+def test_incr_missing_key_starts_at_zero(redis_server):
+    # client.incr() always sends INCRBY, even with no amount given, so we
+    # go through execute_command to hit the actual INCR command we built.
+    client = redis.Redis(host=HOST, port=PORT, protocol=2)
+    assert client.execute_command("INCR", "counter") == 1
+
+
+def test_incr_existing_integer_value(redis_server):
+    client = redis.Redis(host=HOST, port=PORT, protocol=2)
+    client.set("counter", "10")
+    assert client.execute_command("INCR", "counter") == 11
+
+
+def test_incr_non_integer_returns_error(redis_server):
+    client = redis.Redis(host=HOST, port=PORT, protocol=2)
+    client.set("counter", "not a number")
+    with pytest.raises(redis.ResponseError):
+        client.execute_command("INCR", "counter")
+
+
+def test_decr_existing_integer_value(redis_server):
+    # Same INCRBY/DECRBY substitution as incr() above.
+    client = redis.Redis(host=HOST, port=PORT, protocol=2)
+    client.set("counter", "10")
+    assert client.execute_command("DECR", "counter") == 9
+
+
+def test_append_to_missing_key_creates_it(redis_server):
+    client = redis.Redis(host=HOST, port=PORT, protocol=2)
+    assert client.append("foo", "bar") == 3
+    assert client.get("foo") == b"bar"
+
+
+def test_append_to_existing_key_returns_new_length(redis_server):
+    client = redis.Redis(host=HOST, port=PORT, protocol=2)
+    client.set("foo", "bar")
+    assert client.append("foo", "baz") == 6
+    assert client.get("foo") == b"barbaz"
+
+
+def test_mset_sets_multiple_keys(redis_server):
+    client = redis.Redis(host=HOST, port=PORT, protocol=2)
+    assert client.mset({"a": "1", "b": "2"}) is True
+    assert client.get("a") == b"1"
+    assert client.get("b") == b"2"
+
+
+def test_mget_returns_values_in_order_with_none_for_missing(redis_server):
+    client = redis.Redis(host=HOST, port=PORT, protocol=2)
+    client.set("a", "1")
+    client.set("c", "3")
+    assert client.mget("a", "b", "c") == [b"1", None, b"3"]
+
+
+def test_type_of_existing_key_returns_string(redis_server):
+    client = redis.Redis(host=HOST, port=PORT, protocol=2)
+    client.set("foo", "bar")
+    assert client.type("foo") == b"string"
+
+
+def test_type_of_missing_key_returns_none(redis_server):
+    client = redis.Redis(host=HOST, port=PORT, protocol=2)
+    assert client.type("nosuchkey") == b"none"
+
+
+def test_concurrent_incr_no_lost_updates(redis_server):
+    # Many connections racing to INCR the same counter. incr() is a
+    # read-modify-write, not a single dict op like set()/delete(), so this
+    # is the empirical proof that no-await-inside-the-handler really does
+    # make it atomic relative to other connections under asyncio.
+    client = redis.Redis(host=HOST, port=PORT, protocol=2)
+    client.set("counter", "0")
+    workers, increments_per_worker = 20, 50
+
+    def incr_many() -> None:
+        worker_client = redis.Redis(host=HOST, port=PORT, protocol=2)
+        for _ in range(increments_per_worker):
+            worker_client.execute_command("INCR", "counter")
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(pool.map(lambda _: incr_many(), range(workers)))
+
+    assert int(client.get("counter")) == workers * increments_per_worker
+
+
+def test_concurrent_append_no_lost_updates(redis_server):
+    # Same read-modify-write shape as INCR, applied to APPEND: many
+    # connections racing to append a fixed token to the same key. If any
+    # append were lost to interleaving, the final length would be short.
+    client = redis.Redis(host=HOST, port=PORT, protocol=2)
+    client.set("log", "")
+    token = "x"
+    workers, appends_per_worker = 20, 50
+
+    def append_many() -> None:
+        worker_client = redis.Redis(host=HOST, port=PORT, protocol=2)
+        for _ in range(appends_per_worker):
+            worker_client.append("log", token)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(pool.map(lambda _: append_many(), range(workers)))
+
+    final = client.get("log")
+    assert len(final) == workers * appends_per_worker * len(token)
+    assert final == (token * (workers * appends_per_worker)).encode()

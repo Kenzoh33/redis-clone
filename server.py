@@ -3,6 +3,7 @@
 import asyncio
 
 from protocol import (
+    encode_array,
     encode_bulk_string,
     encode_error,
     encode_integer,
@@ -59,6 +60,55 @@ def handle_ttl(args: list[str]) -> bytes:
     return encode_integer(store.ttl(args[0]))
 
 
+def handle_exists(args: list[str]) -> bytes:
+    if not args:
+        return encode_error("ERR wrong number of arguments for 'exists' command")
+    return encode_integer(store.exists(*args))
+
+
+def handle_incr(args: list[str]) -> bytes:
+    if len(args) != 1:
+        return encode_error("ERR wrong number of arguments for 'incr' command")
+    try:
+        return encode_integer(store.incr(args[0]))
+    except ValueError:
+        return encode_error("ERR value is not an integer or out of range")
+
+
+def handle_decr(args: list[str]) -> bytes:
+    if len(args) != 1:
+        return encode_error("ERR wrong number of arguments for 'decr' command")
+    try:
+        return encode_integer(store.decr(args[0]))
+    except ValueError:
+        return encode_error("ERR value is not an integer or out of range")
+
+
+def handle_append(args: list[str]) -> bytes:
+    if len(args) != 2:
+        return encode_error("ERR wrong number of arguments for 'append' command")
+    return encode_integer(store.append(args[0], args[1]))
+
+
+def handle_mset(args: list[str]) -> bytes:
+    if not args or len(args) % 2 != 0:
+        return encode_error("ERR wrong number of arguments for 'mset' command")
+    store.mset(dict(zip(args[0::2], args[1::2])))
+    return encode_simple_string("OK")
+
+
+def handle_mget(args: list[str]) -> bytes:
+    if not args:
+        return encode_error("ERR wrong number of arguments for 'mget' command")
+    return encode_array([encode_bulk_string(v) for v in store.mget(*args)])
+
+
+def handle_type(args: list[str]) -> bytes:
+    if len(args) != 1:
+        return encode_error("ERR wrong number of arguments for 'type' command")
+    return encode_simple_string(store.type(args[0]))
+
+
 COMMANDS = {
     "PING": handle_ping,
     "GET": handle_get,
@@ -66,6 +116,13 @@ COMMANDS = {
     "DEL": handle_del,
     "EXPIRE": handle_expire,
     "TTL": handle_ttl,
+    "EXISTS": handle_exists,
+    "INCR": handle_incr,
+    "DECR": handle_decr,
+    "APPEND": handle_append,
+    "MSET": handle_mset,
+    "MGET": handle_mget,
+    "TYPE": handle_type,
 }
 
 

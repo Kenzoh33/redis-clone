@@ -161,3 +161,140 @@ def test_active_expiration_loop_removes_expired_key_without_a_read():
 
     asyncio.run(scenario())
     assert "foo" not in store._data
+
+
+def test_exists_counts_only_existing_keys():
+    store = Store()
+    store.set("a", "1")
+    store.set("b", "2")
+    assert store.exists("a", "b", "c") == 2
+
+
+def test_exists_counts_duplicate_keys_twice():
+    store = Store()
+    store.set("a", "1")
+    assert store.exists("a", "a") == 2
+
+
+def test_exists_does_not_count_expired_key():
+    clock = FakeClock()
+    store = Store(clock=clock)
+    store.set("foo", "bar")
+    store.expire("foo", 5)
+    clock.advance(6)
+    assert store.exists("foo") == 0
+
+
+def test_incr_missing_key_starts_at_zero():
+    store = Store()
+    assert store.incr("counter") == 1
+
+
+def test_incr_existing_integer_value():
+    store = Store()
+    store.set("counter", "10")
+    assert store.incr("counter") == 11
+
+
+def test_incr_non_integer_value_raises_value_error():
+    store = Store()
+    store.set("counter", "not a number")
+    try:
+        store.incr("counter")
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
+
+
+def test_incr_does_not_clear_existing_ttl():
+    clock = FakeClock()
+    store = Store(clock=clock)
+    store.set("counter", "1")
+    store.expire("counter", 10)
+    store.incr("counter")
+    assert store.ttl("counter") == 10
+
+
+def test_decr_missing_key_starts_at_zero():
+    store = Store()
+    assert store.decr("counter") == -1
+
+
+def test_decr_existing_integer_value():
+    store = Store()
+    store.set("counter", "10")
+    assert store.decr("counter") == 9
+
+
+def test_append_to_missing_key_creates_it():
+    store = Store()
+    assert store.append("foo", "bar") == 3
+    assert store.get("foo") == "bar"
+
+
+def test_append_to_existing_key_returns_new_length():
+    store = Store()
+    store.set("foo", "bar")
+    assert store.append("foo", "baz") == 6
+    assert store.get("foo") == "barbaz"
+
+
+def test_append_does_not_clear_existing_ttl():
+    clock = FakeClock()
+    store = Store(clock=clock)
+    store.set("foo", "bar")
+    store.expire("foo", 10)
+    store.append("foo", "baz")
+    assert store.ttl("foo") == 10
+
+
+def test_mset_sets_multiple_keys():
+    store = Store()
+    store.mset({"a": "1", "b": "2"})
+    assert store.get("a") == "1"
+    assert store.get("b") == "2"
+
+
+def test_mset_clears_ttl_on_each_key():
+    clock = FakeClock()
+    store = Store(clock=clock)
+    store.set("a", "1")
+    store.expire("a", 10)
+    store.mset({"a": "2"})
+    assert store.ttl("a") == -1
+
+
+def test_mget_returns_values_in_order_with_none_for_missing():
+    store = Store()
+    store.set("a", "1")
+    store.set("c", "3")
+    assert store.mget("a", "b", "c") == ["1", None, "3"]
+
+
+def test_mget_does_not_return_expired_value():
+    clock = FakeClock()
+    store = Store(clock=clock)
+    store.set("foo", "bar")
+    store.expire("foo", 5)
+    clock.advance(6)
+    assert store.mget("foo") == [None]
+
+
+def test_type_of_existing_key_returns_string():
+    store = Store()
+    store.set("foo", "bar")
+    assert store.type("foo") == "string"
+
+
+def test_type_of_missing_key_returns_none():
+    store = Store()
+    assert store.type("nosuchkey") == "none"
+
+
+def test_type_of_expired_key_returns_none():
+    clock = FakeClock()
+    store = Store(clock=clock)
+    store.set("foo", "bar")
+    store.expire("foo", 5)
+    clock.advance(6)
+    assert store.type("foo") == "none"
