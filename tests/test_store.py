@@ -298,3 +298,32 @@ def test_type_of_expired_key_returns_none():
     store.expire("foo", 5)
     clock.advance(6)
     assert store.type("foo") == "none"
+
+
+def test_snapshot_of_empty_store_is_empty():
+    store = Store()
+    assert store.snapshot() == []
+
+
+def test_snapshot_includes_keys_without_ttl():
+    store = Store()
+    store.set("a", "1")
+    store.set("b", "2")
+    assert set(store.snapshot()) == {("a", "1", -1), ("b", "2", -1)}
+
+
+def test_snapshot_includes_positive_ttl_for_keys_with_expiry():
+    clock = FakeClock()
+    store = Store(clock=clock)
+    store.set("foo", "bar")
+    store.expire("foo", 10)
+    assert store.snapshot() == [("foo", "bar", 10)]
+
+
+def test_snapshot_excludes_expired_key():
+    clock = FakeClock()
+    store = Store(clock=clock)
+    store.set("foo", "bar")
+    store.expire("foo", 5)
+    clock.advance(6)
+    assert store.snapshot() == []

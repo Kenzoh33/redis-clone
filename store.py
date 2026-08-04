@@ -104,6 +104,14 @@ class Store:
         self._expire_if_due(key)
         return "string" if key in self._data else "none"
 
+    def snapshot(self) -> list[tuple[str, str, int]]:
+        result = []
+        for key in list(self._data):
+            self._expire_if_due(key)
+            if key in self._data:
+                result.append((key, self._data[key], self.ttl(key)))
+        return result
+
 
 async def run_active_expiration(store: Store, interval: float) -> None:
     while True:

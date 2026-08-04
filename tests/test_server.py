@@ -296,9 +296,11 @@ def test_concurrent_append_no_lost_updates(redis_server):
     assert final == (token * (workers * appends_per_worker)).encode()
 
 
-def _spawn_server(log_path) -> subprocess.Popen:
-    proc = subprocess.Popen([sys.executable, str(SERVER_SCRIPT), str(log_path)])
-    _wait_for_port(HOST, PORT)
+def _spawn_server(log_path, port: int = PORT, extra_args: list[str] = ()) -> subprocess.Popen:
+    proc = subprocess.Popen(
+        [sys.executable, str(SERVER_SCRIPT), str(log_path), "--port", str(port), *extra_args]
+    )
+    _wait_for_port(HOST, port)
     return proc
 
 
@@ -363,3 +365,104 @@ def test_fresh_server_with_no_log_starts_empty(tmp_path):
     finally:
         proc.terminate()
         proc.wait(timeout=5)
+
+
+REPLICA_PORT = 6380
+
+
+def _poll_until(predicate, timeout: float = 3.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.05)
+    raise TimeoutError("condition not met before timeout")
+
+
+def test_replica_full_resync_gets_existing_data(tmp_path):
+    primary_proc = _spawn_server(tmp_path / "primary.aof")
+    try:
+        primary = redis.Redis(host=HOST, port=PORT, protocol=2)
+        primary.set("foo", "bar")
+        primary.expire("foo", 3600)
+
+        replica_proc = _spawn_server(
+            tmp_path / "replica.aof",
+            port=REPLICA_PORT,
+            extra_args=["--replicaof", HOST, str(PORT)],
+        )
+        try:
+            replica = redis.Redis(host=HOST, port=REPLICA_PORT, protocol=2)
+            _poll_until(lambda: replica.get("foo") == b"bar")
+            assert replica.ttl("foo") > 0
+        finally:
+            replica_proc.terminate()
+            replica_proc.wait(timeout=5)
+    finally:
+        primary_proc.terminate()
+        primary_proc.wait(timeout=5)
+
+
+def test_replica_streams_live_writes(tmp_path):
+    primary_proc = _spawn_server(tmp_path / "primary.aof")
+    try:
+        replica_proc = _spawn_server(
+            tmp_path / "replica.aof",
+            port=REPLICA_PORT,
+            extra_args=["--replicaof", HOST, str(PORT)],
+        )
+        try:
+            primary = redis.Redis(host=HOST, port=PORT, protocol=2)
+            replica = redis.Redis(host=HOST, port=REPLICA_PORT, protocol=2)
+
+            primary.set("baz", "qux")
+            _poll_until(lambda: replica.get("baz") == b"qux")
+        finally:
+            replica_proc.terminate()
+            replica_proc.wait(timeout=5)
+    finally:
+        primary_proc.terminate()
+        primary_proc.wait(timeout=5)
+
+
+def test_replica_rejects_writes(tmp_path):
+    primary_proc = _spawn_server(tmp_path / "primary.aof")
+    try:
+        replica_proc = _spawn_server(
+            tmp_path / "replica.aof",
+            port=REPLICA_PORT,
+            extra_args=["--replicaof", HOST, str(PORT)],
+        )
+        try:
+            replica = redis.Redis(host=HOST, port=REPLICA_PORT, protocol=2)
+            with pytest.raises(redis.ResponseError):
+                replica.set("nope", "shouldfail")
+        finally:
+            replica_proc.terminate()
+            replica_proc.wait(timeout=5)
+    finally:
+        primary_proc.terminate()
+        primary_proc.wait(timeout=5)
+
+
+def test_replica_allows_reads(tmp_path):
+    primary_proc = _spawn_server(tmp_path / "primary.aof")
+    try:
+        primary = redis.Redis(host=HOST, port=PORT, protocol=2)
+        primary.set("foo", "bar")
+
+        replica_proc = _spawn_server(
+            tmp_path / "replica.aof",
+            port=REPLICA_PORT,
+            extra_args=["--replicaof", HOST, str(PORT)],
+        )
+        try:
+            replica = redis.Redis(host=HOST, port=REPLICA_PORT, protocol=2)
+            _poll_until(lambda: replica.get("foo") == b"bar")
+            assert replica.ping() is True
+        finally:
+            replica_proc.terminate()
+            replica_proc.wait(timeout=5)
+    finally:
+        primary_proc.terminate()
+        primary_proc.wait(timeout=5)

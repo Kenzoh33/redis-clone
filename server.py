@@ -1,7 +1,7 @@
 """Asyncio TCP server: accepts connections and dispatches RESP commands."""
 
+import argparse
 import asyncio
-import sys
 import time
 
 from persistence import PersistenceLog, replay
@@ -22,6 +22,8 @@ DEFAULT_LOG_PATH = "appendonly.log"
 
 store = Store()
 persistence_log: PersistenceLog | None = None
+replica_writer: asyncio.StreamWriter | None = None
+IS_REPLICA = False
 
 
 def handle_ping(args: list[str]) -> bytes:
@@ -142,6 +144,25 @@ def apply_logged_command(args: list[str]) -> None:
         COMMANDS[name](cmd_args)
 
 
+def build_logged_command(name: str, command: list[str]) -> list[str]:
+    if name == "EXPIRE":
+        deadline = time.time() + int(command[2])
+        return ["EXPIRE", command[1], str(deadline)]
+    return [name, *command[1:]]
+
+
+async def run_replica(host: str, port: int) -> None:
+    reader, writer = await asyncio.open_connection(host, port)
+    writer.write(encode_array([encode_bulk_string("SYNC")]))
+    await writer.drain()
+    while True:
+        command = await parse_command(reader)
+        if command is None:
+            break
+        apply_logged_command(command)
+        persistence_log.append(command)
+
+
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     peer = writer.get_extra_info("peername")
     print(f"client connected: {peer}")
@@ -161,37 +182,79 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 continue
 
             name = command[0].upper()
+
+            if name == "SYNC":
+                global replica_writer
+                replica_writer = writer
+                for key, value, ttl in store.snapshot():
+                    writer.write(encode_array([encode_bulk_string(x) for x in ["SET", key, value]]))
+                    if ttl != -1:
+                        deadline = time.time() + ttl
+                        writer.write(
+                            encode_array([encode_bulk_string(x) for x in ["EXPIRE", key, str(deadline)]])
+                        )
+                await writer.drain()
+                continue
+
             handler = COMMANDS.get(name)
             if handler is None:
                 response = encode_error(f"ERR unknown command '{command[0]}'")
+            elif IS_REPLICA and name in MUTATING_COMMANDS:
+                response = encode_error("READONLY You can't write against a read only replica.")
             else:
                 response = handler(command[1:])
 
                 if name in MUTATING_COMMANDS and not response.startswith(b"-"):
-                    if name == "EXPIRE":
-                        deadline = time.time() + int(command[2])
-                        persistence_log.append(["EXPIRE", command[1], str(deadline)])
-                    else:
-                        persistence_log.append([name, *command[1:]])
+                    logged_command = build_logged_command(name, command)
+                    persistence_log.append(logged_command)
+                    if replica_writer is not None:
+                        replica_writer.write(
+                            encode_array([encode_bulk_string(x) for x in logged_command])
+                        )
+                        await replica_writer.drain()
 
             writer.write(response)
             await writer.drain()
     finally:
+        if writer is replica_writer:
+            replica_writer = None
         print(f"client disconnected: {peer}")
         writer.close()
         await writer.wait_closed()
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("log_path", nargs="?", default=DEFAULT_LOG_PATH)
+    parser.add_argument("--port", type=int, default=PORT)
+    parser.add_argument("--replicaof", nargs=2, metavar=("HOST", "PORT"))
+    return parser.parse_args()
+
+
 async def main() -> None:
-    global persistence_log
+    global persistence_log, IS_REPLICA
 
-    log_path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_LOG_PATH
-    replay(log_path, apply=apply_logged_command)
-    persistence_log = PersistenceLog(log_path)
+    args = parse_args()
+    IS_REPLICA = args.replicaof is not None
 
-    asyncio.create_task(run_active_expiration(store, ACTIVE_EXPIRATION_INTERVAL_SECONDS))
-    server = await asyncio.start_server(handle_client, HOST, PORT)
-    print(f"listening on {HOST}:{PORT}")
+    replay(args.log_path, apply=apply_logged_command)
+    persistence_log = PersistenceLog(args.log_path)
+
+    # create_task() doesn't hold a strong reference to the task it returns;
+    # without keeping one ourselves, these background tasks can be garbage
+    # collected mid-flight. background_tasks stays alive for main()'s whole
+    # lifetime, which keeps them alive too.
+    background_tasks: set[asyncio.Task] = set()
+    background_tasks.add(
+        asyncio.create_task(run_active_expiration(store, ACTIVE_EXPIRATION_INTERVAL_SECONDS))
+    )
+
+    if IS_REPLICA:
+        primary_host, primary_port = args.replicaof
+        background_tasks.add(asyncio.create_task(run_replica(primary_host, int(primary_port))))
+
+    server = await asyncio.start_server(handle_client, HOST, args.port)
+    print(f"listening on {HOST}:{args.port}")
     async with server:
         await server.serve_forever()
 
